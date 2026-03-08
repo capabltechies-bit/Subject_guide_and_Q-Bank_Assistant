@@ -28,9 +28,7 @@ pip install -r requirements.txt
 ### 4. Set your API key
 Create a `.env` file (never commit this!):
 ```
-OPENAI_API_KEY=sk-...
-# OR
-GOOGLE_API_KEY=...
+GOOGLE_API_KEY=your-google-api-key-here
 ```
 
 ### 5. Run the app
@@ -45,11 +43,13 @@ Open `http://localhost:8501` in your browser.
 ## 🏗️ Project Structure
 
 ```
-subject_guide_assistant/
-├── app.py                  # Streamlit UI (4 tabs)
+subject-guide-assistant/
+├── app.py                  # Streamlit UI (Chat + Upload views)
 ├── document_processor.py   # PDF / DOCX / PPTX / TXT extraction + chunking
-├── rag_engine.py           # FAISS vector store + LangChain RAG pipeline
+├── vector_store.py         # FAISS vector store + Google Gemini embeddings
+├── rag_engine.py           # RAG pipeline — topic explainer & exam solver
 ├── requirements.txt        # Python dependencies
+├── .env                    # API keys (never commit!)
 └── README.md               # This file
 ```
 
@@ -62,11 +62,12 @@ subject_guide_assistant/
 | Multi-format upload (PDF, DOCX, PPTX, TXT) | ✅ |
 | Auto content-type detection (textbook / notes / question paper / lab) | ✅ |
 | FAISS-powered semantic search | ✅ |
+| Google Gemini embeddings (text-embedding-004) | ✅ |
 | Topic explanation with structured output | ✅ |
-| Exam question solving with step-by-step breakdown | ✅ |
+| Exam question solving with mark-aware breakdown | ✅ |
 | Source attribution for every answer | ✅ |
-| Query history | ✅ |
-| OpenAI + Google Gemini support | ✅ |
+| Chat-style conversation history | ✅ |
+| Modern dark-themed Streamlit UI | ✅ |
 | Streamlit Cloud deployment | ✅ |
 
 ---
@@ -76,9 +77,9 @@ subject_guide_assistant/
 1. Push this repo to GitHub (make sure `.env` is in `.gitignore`)
 2. Go to [share.streamlit.io](https://share.streamlit.io)
 3. Connect your GitHub repo → select `app.py`
-4. Add `OPENAI_API_KEY` in **Secrets** (Settings → Secrets):
+4. Add your API key in **Secrets** (Settings → Secrets):
    ```toml
-   OPENAI_API_KEY = "sk-..."
+   GOOGLE_API_KEY = "your-google-api-key-here"
    ```
 5. Click **Deploy** 🎉
 
@@ -87,24 +88,25 @@ subject_guide_assistant/
 ## 📖 How It Works
 
 ```
-Upload PDF/DOCX/PPTX
+Upload PDF / DOCX / PPTX / TXT
         │
         ▼
 document_processor.py
-  • Extracts text by format
+  • Extracts text by format (pdfplumber, python-docx, python-pptx)
   • Detects content type via keyword heuristics
-  • Splits into overlapping 800-char chunks
+    (textbook / notes / question_paper / lab_manual)
+  • Splits into overlapping 800-char chunks (150-char overlap)
         │
         ▼
-rag_engine.py  →  AcademicVectorStore
-  • Embeds chunks via OpenAI text-embedding-3-small
-  • Stores in FAISS IndexFlatL2
+vector_store.py
+  • Embeds chunks via Google Gemini text-embedding-004
+  • Stores vectors in FAISS IndexFlatL2 (in-memory)
         │
         ▼
-User Query
+User Query (Chat UI)
   • Embed query → FAISS similarity search → top-k chunks
-  • Build prompt with context + question
-  • Call GPT-3.5-turbo / Gemini-Pro
+  • Build prompt with retrieved context + question
+  • Call Gemini 1.5 Flash via rag_engine.py
   • Return structured answer + source attribution
 ```
 
@@ -116,30 +118,54 @@ User Query
 |---|---|
 | Frontend | Streamlit 1.35+ |
 | Backend | Python 3.11 |
-| Orchestration | LangChain 0.2 |
 | Vector DB | FAISS (local, in-memory) |
-| LLM | OpenAI GPT-3.5-turbo / Google Gemini Pro |
-| Embeddings | OpenAI text-embedding-3-small |
+| LLM | Google Gemini 1.5 Flash |
+| Embeddings | Google Gemini text-embedding-004 |
 | PDF parsing | pdfplumber + PyPDF2 |
 | DOCX parsing | python-docx |
 | PPTX parsing | python-pptx |
+| API SDK | google-generativeai / google-genai |
+
+---
+
+## 📦 Requirements
+
+```
+streamlit
+google-generativeai
+google-genai
+faiss-cpu
+pdfplumber
+PyPDF2
+python-docx
+python-pptx
+python-dotenv
+numpy
+```
+
+Install all at once:
+```bash
+pip install -r requirements.txt
+```
 
 ---
 
 ## 👥 Team Checklist (Week 1–2)
 
 - [x] GitHub repo with project structure
-- [x] Development environment (Python, LangChain, Streamlit, FAISS)
-- [x] Multi-format document processing (PDF, DOCX, PPTX)
+- [x] Development environment (Python, Streamlit, FAISS, Gemini)
+- [x] Multi-format document processing (PDF, DOCX, PPTX, TXT)
 - [x] Content categorization (notes / textbook / question paper / lab)
-- [x] Topic-based retrieval system (FAISS + embeddings)
-- [x] Streamlit interface with upload + query UI
+- [x] Topic-based retrieval system (FAISS + Gemini embeddings)
+- [x] RAG pipeline with topic explainer and exam solver modes
+- [x] Streamlit chat UI with upload + query views
+- [x] Modern dark-themed UI with custom CSS
 - [ ] Deploy on Streamlit Cloud ← **do this as a team**
 - [ ] Record 2-minute demo video
 
 ---
 
-## 📝 .gitignore template
+## 📝 .gitignore Template
 
 ```
 .env
