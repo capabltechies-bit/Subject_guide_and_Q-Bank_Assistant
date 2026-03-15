@@ -1,14 +1,29 @@
+"""
+app.py  ─  Scholar AI  ─  Week 3-4 Enhanced
+New views : Learning Path | Q-Bank | Knowledge Graph
+New modes : Synthesize | Exam Map
+New feature: Adaptive explanation levels (Beginner / Intermediate / Advanced)
+New sidebar: Subject & chapter filters
+"""
+
 import streamlit as st
+import streamlit.components.v1 as components
 import tempfile, os
 from pathlib import Path
 
-from vector_store import get_stats, add_documents
+from vector_store      import get_stats, add_documents
 from document_processor import process_document
-from rag_engine import answer_topic, solve_question
+from rag_engine        import (
+    answer_topic, solve_question,
+    synthesize_topic, generate_learning_path,
+    identify_prerequisites, map_topic_to_exam,
+)
+from question_bank     import generate_mcq, generate_short_answer, generate_long_answer, generate_full_assessment
+from knowledge_graph   import build_knowledge_graph, get_topic_subgraph, render_graph_html
 
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 #  PAGE CONFIG
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 st.set_page_config(
     page_title="Scholar AI",
     page_icon="🎓",
@@ -16,22 +31,32 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 #  SESSION STATE
-# ══════════════════════════════════════════════════════
-if "history" not in st.session_state:  st.session_state.history  = []
-if "indexed" not in st.session_state:  st.session_state.indexed  = False
-if "mode"    not in st.session_state:  st.session_state.mode     = "explain"
-if "view"    not in st.session_state:  st.session_state.view     = "chat"
+# ══════════════════════════════════════════════════════════════════════════════
+DEFAULTS = {
+    "history":      [],
+    "indexed":      False,
+    "mode":         "explain",     # explain | exam | synthesize | exam_map
+    "level":        "intermediate",# beginner | intermediate | advanced
+    "view":         "chat",        # chat | upload | learning_path | qbank | knowledge_graph
+    "subject_filter": None,
+    "chapter_filter": None,
+    "kg_data":      None,          # cached knowledge graph
+    "lp_result":    None,          # cached learning path result
+    "qb_result":    None,          # cached Q-bank result
+}
+for k, v in DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-# ══════════════════════════════════════════════════════
-#  GLOBAL CSS  — dark theme, all text fully visible
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+#  CSS
+# ══════════════════════════════════════════════════════════════════════════════
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&family=Lora:ital,wght@0,400;0,600;1,400&display=swap');
 
-/* ─── Design Tokens ─── */
 :root {
   --bg:         #0d0f14;
   --surface:    #151820;
@@ -39,490 +64,212 @@ st.markdown("""
   --surface3:   #222840;
   --border:     #2a3045;
   --border2:    #333d58;
-
-  /* All text colours guaranteed visible on dark */
-  --text:       #eceef5;   /* primary — near-white */
-  --text2:      #a0a8c0;   /* secondary — light grey-blue */
-  --text3:      #606880;   /* muted — still readable */
-  --text-inv:   #0d0f14;   /* text on light/accent backgrounds */
-
+  --text:       #eceef5;
+  --text2:      #a0a8c0;
+  --text3:      #606880;
+  --text-inv:   #0d0f14;
   --accent:     #6c8ef5;
   --accent2:    #4a6de0;
   --accent-lt:  rgba(108,142,245,.14);
   --accent-glow:rgba(108,142,245,.25);
-
   --gold:       #f0b84a;
   --gold-lt:    rgba(240,184,74,.13);
   --sage:       #4ecb8d;
   --sage-lt:    rgba(78,203,141,.13);
   --rose:       #f07070;
   --rose-lt:    rgba(240,112,112,.12);
-
+  --purple:     #a78bfa;
+  --purple-lt:  rgba(167,139,250,.13);
+  --cyan:       #38bdf8;
+  --cyan-lt:    rgba(56,189,248,.13);
   --r:    11px;
   --r-lg: 18px;
   --sh:   0 2px 8px rgba(0,0,0,.4);
   --sh-lg:0 8px 32px rgba(0,0,0,.55);
 }
-
-/* ─── Base reset ─── */
 *, *::before, *::after { box-sizing: border-box; }
-html, body, .stApp {
-  background: var(--bg) !important;
-  font-family: 'Sora', sans-serif;
-  color: var(--text);
-}
-
-/* ─── Hide Streamlit chrome ─── */
+html, body, .stApp { background: var(--bg) !important; font-family: 'Sora', sans-serif; color: var(--text); }
 #MainMenu, footer, header, [data-testid="stToolbar"] { visibility:hidden; height:0; }
 .block-container { padding:0 !important; max-width:100% !important; }
 
-/* ════════════════════════════════════════
-   FORCE ALL STREAMLIT TEXT VISIBLE
-   (catches labels, captions, help text,
-    radio options, selectbox, file uploader)
-════════════════════════════════════════ */
-.stApp p,
-.stApp span,
-.stApp label,
-.stApp div,
-.stApp li,
-.stApp small,
-.stApp caption,
-[data-testid="stMarkdownContainer"],
-[data-testid="stMarkdownContainer"] p,
-[data-testid="stMarkdownContainer"] li,
-[class*="stText"],
-[class*="stCaption"] {
-  color: var(--text) !important;
-}
+/* ── Force all Streamlit text visible ── */
+.stApp p, .stApp span, .stApp label, .stApp div, .stApp li, .stApp small,
+[data-testid="stMarkdownContainer"], [data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] li, [class*="stText"] { color: var(--text) !important; }
+.stApp .stCaption, [data-testid="stCaptionContainer"] p, .stApp small { color: var(--text2) !important; }
 
-/* Muted helper/caption text */
-.stApp .stCaption,
-.stApp [data-testid="stCaptionContainer"] p,
-.stApp small { color: var(--text2) !important; }
+/* ── File uploader ── */
+[data-testid="stFileUploader"] section, [data-testid="stFileUploader"] section *,
+[data-testid="stFileUploader"] button, [data-testid="stFileUploader"] button span,
+[data-testid="stFileUploaderFileName"], [data-testid="stFileUploaderFileData"] * { color: var(--text2) !important; }
+[data-testid="stFileUploader"] button { background: var(--surface3) !important; border: 1px solid var(--border2) !important; border-radius: 8px !important; }
+[data-testid="stFileUploader"] > div { background: var(--surface2) !important; border: 2px dashed var(--border2) !important; border-radius: 14px !important; padding: 36px 28px !important; transition: border-color .2s, background .2s !important; }
+[data-testid="stFileUploader"] > div:hover { border-color: var(--accent) !important; background: var(--accent-lt) !important; }
 
-/* ─── File uploader — all text visible ─── */
-[data-testid="stFileUploader"] section,
-[data-testid="stFileUploader"] section *,
-[data-testid="stFileUploader"] button,
-[data-testid="stFileUploader"] button span,
-[data-testid="stFileUploadDropzone"] *,
-[data-testid="stFileUploaderFileName"],
-[data-testid="stFileUploaderFileData"],
-[data-testid="stFileUploaderFileData"] *  {
-  color: var(--text2) !important;
+/* ── Text input / textarea ── */
+.stTextInput > div > div > input, .stTextArea > div > div > textarea {
+  background: var(--surface2) !important; border: 1.5px solid var(--border2) !important;
+  border-radius: 12px !important; padding: 14px 16px !important; font-size: 14px !important;
+  font-family: 'Sora', sans-serif !important; color: var(--text) !important;
+  caret-color: var(--accent) !important; resize: none !important; transition: border-color .2s, box-shadow .2s !important;
 }
-[data-testid="stFileUploader"] button {
-  background: var(--surface3) !important;
-  border: 1px solid var(--border2) !important;
-  border-radius: 8px !important;
-  color: var(--text) !important;
-}
-[data-testid="stFileUploader"] button:hover {
-  background: var(--border2) !important;
-}
+.stTextInput > div > div > input::placeholder, .stTextArea > div > div > textarea::placeholder { color: var(--text3) !important; }
+.stTextInput > div > div > input:focus, .stTextArea > div > div > textarea:focus { border-color: var(--accent) !important; box-shadow: 0 0 0 3px var(--accent-glow) !important; outline: none !important; }
+.stTextInput > div > div, .stTextInput > div, .stTextArea > div > div, .stTextArea > div,
+[data-baseweb="input"], [data-baseweb="textarea"] { background: transparent !important; border: none !important; box-shadow: none !important; }
+.stTextInput label, .stTextArea label { color: var(--text2) !important; font-size: 13px !important; }
 
-/* ─── Text input — visible text & placeholder ─── */
-.stTextInput > div > div > input,
-.stTextArea > div > div > textarea {
-  background: var(--surface2) !important;
-  border: 1.5px solid var(--border2) !important;
-  border-radius: 12px !important;
-  padding: 14px 16px !important;
-  font-size: 14px !important;
-  font-family: 'Sora', sans-serif !important;
-  color: var(--text) !important;
-  caret-color: var(--accent) !important;
-  resize: none !important;
-  transition: border-color .2s, box-shadow .2s !important;
-}
-.stTextInput > div > div > input::placeholder,
-.stTextArea > div > div > textarea::placeholder { color: var(--text3) !important; }
-.stTextInput > div > div > input:focus,
-.stTextArea > div > div > textarea:focus {
-  border-color: var(--accent) !important;
-  box-shadow: 0 0 0 3px var(--accent-glow) !important;
-  outline: none !important;
-}
-.stTextInput > div > div,
-.stTextInput > div,
-.stTextArea > div > div,
-.stTextArea > div,
-[data-baseweb="input"],
-[data-baseweb="textarea"] {
-  background: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-}
-.stTextInput label,
-.stTextArea label { color: var(--text2) !important; font-size: 13px !important; }
+/* ── Selectbox ── */
+[data-baseweb="select"] > div { background: var(--surface2) !important; border: 1.5px solid var(--border2) !important; border-radius: 10px !important; }
+[data-baseweb="select"] span, [data-baseweb="select"] div,
+[data-baseweb="popover"] li, [data-baseweb="popover"] span { color: var(--text) !important; background: var(--surface2) !important; }
+[data-baseweb="popover"] [aria-selected="true"] { background: var(--accent-lt) !important; }
 
-/* ─── Selectbox ─── */
-[data-baseweb="select"] > div {
-  background: var(--surface2) !important;
-  border: 1.5px solid var(--border2) !important;
-  border-radius: 10px !important;
-}
-[data-baseweb="select"] span,
-[data-baseweb="select"] div,
-[data-baseweb="popover"] li,
-[data-baseweb="popover"] span {
-  color: var(--text) !important;
-  background: var(--surface2) !important;
-}
-[data-baseweb="popover"] [aria-selected="true"] {
-  background: var(--accent-lt) !important;
-}
+/* ── Radio ── */
+[data-testid="stRadio"] label, [data-testid="stRadio"] span { color: var(--text2) !important; }
+[data-testid="stRadio"] label:has(input:checked) span { color: var(--text) !important; }
 
-/* ─── Radio buttons ─── */
-[data-testid="stRadio"] label,
-[data-testid="stRadio"] span {
-  color: var(--text2) !important;
-}
-[data-testid="stRadio"] label:has(input:checked) span {
-  color: var(--text) !important;
-}
-
-/* ─── Checkbox ─── */
-[data-testid="stCheckbox"] span { color: var(--text) !important; }
-
-/* ─── Slider ─── */
-[data-testid="stSlider"] label,
-[data-testid="stSlider"] p { color: var(--text2) !important; }
-
-/* ─── Progress ─── */
+/* ── Progress ── */
 .stProgress > div { background: var(--surface3) !important; border-radius:99px !important; height:5px !important; }
 .stProgress > div > div { background: var(--accent) !important; border-radius:99px !important; }
 
-/* ─── Alerts / Toast ─── */
+/* ── Alerts ── */
 .stAlert { border-radius: 10px !important; font-family:'Sora',sans-serif !important; font-size:13px !important; }
-.stAlert p, .stAlert div { color: inherit !important; }
 
-/* ─── Expander ─── */
+/* ── Expander ── */
 [data-testid="stExpander"] summary p { color: var(--text2) !important; }
 [data-testid="stExpander"] { background: var(--surface2) !important; border: 1px solid var(--border) !important; border-radius: 10px !important; }
 
-/* ─── Spinner ─── */
+/* ── Spinner ── */
 .stSpinner > div { border-top-color: var(--accent) !important; }
-
-/* ─── Divider ─── */
 hr { border-color: var(--border) !important; margin: 20px 0 !important; }
 
-/* ─── Metric ─── */
-[data-testid="stMetricLabel"] p  { color: var(--text3) !important; font-size:11px !important; text-transform:uppercase; letter-spacing:.07em; }
-[data-testid="stMetricValue"]    { color: var(--text) !important; font-size:28px !important; font-weight:700 !important; }
+/* ── Metric ── */
+[data-testid="stMetricLabel"] p { color: var(--text3) !important; font-size:11px !important; text-transform:uppercase; letter-spacing:.07em; }
+[data-testid="stMetricValue"]   { color: var(--text) !important; font-size:28px !important; font-weight:700 !important; }
 
-/* ════════════════════════════════════════
-   SIDEBAR
-════════════════════════════════════════ */
-section[data-testid="stSidebar"] > div:first-child {
-  background: var(--surface) !important;
-  border-right: 1px solid var(--border);
-  padding: 0 !important;
-}
-/* ensure all sidebar text is visible */
-section[data-testid="stSidebar"] p,
-section[data-testid="stSidebar"] span,
-section[data-testid="stSidebar"] label,
-section[data-testid="stSidebar"] div { color: var(--text2) !important; }
-section[data-testid="stSidebar"] h1,
-section[data-testid="stSidebar"] h2,
+/* ══════════ SIDEBAR ══════════ */
+section[data-testid="stSidebar"] > div:first-child { background: var(--surface) !important; border-right: 1px solid var(--border); padding: 0 !important; }
+section[data-testid="stSidebar"] p, section[data-testid="stSidebar"] span,
+section[data-testid="stSidebar"] label, section[data-testid="stSidebar"] div { color: var(--text2) !important; }
+section[data-testid="stSidebar"] h1, section[data-testid="stSidebar"] h2,
 section[data-testid="stSidebar"] h3 { color: var(--text) !important; }
-section[data-testid="stSidebar"] hr  { border-color: var(--border) !important; }
-
-/* sidebar clear button */
 section[data-testid="stSidebar"] .stButton > button {
-  background: var(--rose-lt) !important;
-  color: var(--rose) !important;
-  border: 1px solid rgba(240,112,112,.25) !important;
-  border-radius: 9px !important;
-  font-family: 'Sora', sans-serif !important;
-  font-size: 12px !important; font-weight: 600 !important;
+  background: var(--rose-lt) !important; color: var(--rose) !important;
+  border: 1px solid rgba(240,112,112,.25) !important; border-radius: 9px !important;
+  font-family: 'Sora', sans-serif !important; font-size: 12px !important; font-weight: 600 !important;
   padding: 9px 14px !important; width: 100% !important;
-  transition: background .15s !important;
 }
-section[data-testid="stSidebar"] .stButton > button:hover {
-  background: rgba(240,112,112,.2) !important;
-}
+section[data-testid="stSidebar"] .stButton > button:hover { background: rgba(240,112,112,.2) !important; }
 
-/* ════════════════════════════════════════
-   CUSTOM COMPONENTS
-════════════════════════════════════════ */
+/* ══════════ CUSTOM COMPONENTS ══════════ */
+.sb-logo { display:flex; align-items:center; gap:10px; padding: 22px 20px 18px; border-bottom: 1px solid var(--border); }
+.sb-logo-icon { width:38px; height:38px; border-radius:10px; background: linear-gradient(135deg,#6c8ef5,#4a6de0); display:flex; align-items:center; justify-content:center; font-size:20px; box-shadow:0 2px 10px var(--accent-glow); }
+.sb-logo-text { font-family:'Lora',Georgia,serif; font-size:18px; font-weight:600; color:var(--text) !important; }
+.sb-logo-beta { font-size:9px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:var(--accent) !important; background:var(--accent-lt); border-radius:4px; padding:2px 6px; margin-left:4px; }
 
-/* sidebar logo */
-.sb-logo {
-  display:flex; align-items:center; gap:10px;
-  padding: 22px 20px 18px;
-  border-bottom: 1px solid var(--border);
-}
-.sb-logo-icon {
-  width:38px; height:38px; border-radius:10px;
-  background: linear-gradient(135deg,#6c8ef5,#4a6de0);
-  display:flex; align-items:center; justify-content:center;
-  font-size:20px; box-shadow:0 2px 10px var(--accent-glow);
-}
-.sb-logo-text {
-  font-family:'Lora',Georgia,serif;
-  font-size:18px; font-weight:600; color:var(--text) !important;
-}
-.sb-logo-beta {
-  font-size:9px; font-weight:700; letter-spacing:.1em;
-  text-transform:uppercase; color:var(--accent) !important;
-  background:var(--accent-lt); border-radius:4px;
-  padding:2px 6px; margin-left:4px;
-}
-
-/* sidebar stats */
 .sb-stats { display:flex; gap:8px; margin:18px 20px 0; }
-.sb-stat {
-  flex:1; background:var(--surface2);
-  border:1px solid var(--border); border-radius:10px;
-  padding:12px 10px; text-align:center;
-}
+.sb-stat { flex:1; background:var(--surface2); border:1px solid var(--border); border-radius:10px; padding:12px 10px; text-align:center; }
 .sb-stat-n { font-size:26px; font-weight:700; color:var(--text) !important; line-height:1; }
-.sb-stat-l {
-  font-size:10px; font-weight:600; color:var(--text3) !important;
-  text-transform:uppercase; letter-spacing:.08em; margin-top:4px;
-}
+.sb-stat-l { font-size:10px; font-weight:600; color:var(--text3) !important; text-transform:uppercase; letter-spacing:.08em; margin-top:4px; }
 
-/* status pill */
-.status-pill {
-  display:inline-flex; align-items:center; gap:6px;
-  padding:5px 12px; border-radius:99px;
-  font-size:11px; font-weight:600; margin:14px 20px 0;
-}
+.status-pill { display:inline-flex; align-items:center; gap:6px; padding:5px 12px; border-radius:99px; font-size:11px; font-weight:600; margin:14px 20px 0; }
 .status-on  { background:var(--sage-lt);  color:var(--sage)  !important; border:1px solid rgba(78,203,141,.3); }
 .status-off { background:var(--gold-lt);  color:var(--gold)  !important; border:1px solid rgba(240,184,74,.3); }
 .status-dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
 
-/* sidebar section label */
-.sb-sec {
-  font-size:10px; font-weight:700; letter-spacing:.12em;
-  text-transform:uppercase; color:var(--text3) !important;
-  padding:18px 20px 8px; display:block;
-}
-
-/* file rows */
+.sb-sec { font-size:10px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; color:var(--text3) !important; padding:18px 20px 8px; display:block; }
 .sb-files { padding:0 12px; }
-.sb-file-row {
-  display:flex; align-items:center; gap:9px;
-  padding:8px 8px; border-radius:8px;
-  font-size:12px; color:var(--text2) !important;
-  transition:background .12s; margin-bottom:2px;
-}
+.sb-file-row { display:flex; align-items:center; gap:9px; padding:8px 8px; border-radius:8px; font-size:12px; color:var(--text2) !important; transition:background .12s; margin-bottom:2px; }
 .sb-file-row:hover { background:var(--surface2); }
-.sb-file-icon {
-  width:28px; height:28px; border-radius:7px;
-  display:flex; align-items:center; justify-content:center;
-  font-size:14px; flex-shrink:0;
-}
-.fi-pdf  { background:rgba(240,112,112,.15); }
-.fi-docx { background:var(--accent-lt); }
-.fi-pptx { background:var(--gold-lt); }
-.fi-txt  { background:var(--sage-lt); }
-.fi-gen  { background:var(--surface3); }
+.sb-file-icon { width:28px; height:28px; border-radius:7px; display:flex; align-items:center; justify-content:center; font-size:14px; flex-shrink:0; }
+.fi-pdf { background:rgba(240,112,112,.15); } .fi-docx { background:var(--accent-lt); } .fi-pptx { background:var(--gold-lt); } .fi-txt { background:var(--sage-lt); } .fi-gen { background:var(--surface3); }
 .sb-file-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; color:var(--text2) !important; }
 
-/* ── Top bar nav/mode buttons ── */
-.stButton > button[kind="primary"] {
-  background: linear-gradient(135deg,var(--accent),var(--accent2)) !important;
-  color: #fff !important;
-  border: none !important;
-  border-radius: 9px !important;
-  font-family: 'Sora', sans-serif !important;
-  font-size: 13px !important; font-weight: 600 !important;
-  padding: 9px 18px !important;
-  box-shadow: 0 2px 8px var(--accent-glow) !important;
-  transition: opacity .15s, transform .1s !important;
-}
+/* ── Nav/mode buttons ── */
+.stButton > button[kind="primary"] { background: linear-gradient(135deg,var(--accent),var(--accent2)) !important; color: #fff !important; border: none !important; border-radius: 9px !important; font-family: 'Sora', sans-serif !important; font-size: 12px !important; font-weight: 600 !important; padding: 8px 12px !important; box-shadow: 0 2px 8px var(--accent-glow) !important; transition: opacity .15s, transform .1s !important; }
 .stButton > button[kind="primary"]:hover { opacity:.88 !important; transform:translateY(-1px) !important; }
+.stButton > button[kind="secondary"] { background: var(--surface2) !important; color: var(--text2) !important; border: 1px solid var(--border2) !important; border-radius: 9px !important; font-family: 'Sora', sans-serif !important; font-size: 12px !important; font-weight: 500 !important; padding: 8px 12px !important; transition: all .15s !important; }
+.stButton > button[kind="secondary"]:hover { background: var(--surface3) !important; color: var(--text) !important; }
 
-.stButton > button[kind="secondary"] {
-  background: var(--surface2) !important;
-  color: var(--text2) !important;
-  border: 1px solid var(--border2) !important;
-  border-radius: 9px !important;
-  font-family: 'Sora', sans-serif !important;
-  font-size: 13px !important; font-weight: 500 !important;
-  padding: 9px 18px !important;
-  transition: all .15s !important;
-}
-.stButton > button[kind="secondary"]:hover {
-  background: var(--surface3) !important;
-  color: var(--text) !important;
-}
+/* ── Level pill buttons ── */
+.level-beginner  { color: var(--sage)   !important; background: var(--sage-lt)   !important; }
+.level-intermediate { color: var(--accent) !important; background: var(--accent-lt) !important; }
+.level-advanced  { color: var(--purple) !important; background: var(--purple-lt) !important; }
 
-/* ── Welcome card ── */
-.welcome-card {
-  max-width:560px; margin:0 auto;
-  text-align:center; padding:64px 24px 48px;
-}
-.welcome-glyph {
-  width:76px; height:76px; border-radius:22px;
-  background:var(--accent-lt);
-  border:1px solid rgba(108,142,245,.25);
-  display:flex; align-items:center; justify-content:center;
-  font-size:36px; margin:0 auto 26px;
-  box-shadow:0 4px 16px var(--accent-glow);
-}
-.welcome-h {
-  font-family:'Lora',Georgia,serif;
-  font-size:30px; font-weight:600;
-  color:var(--text); margin:0 0 12px; line-height:1.25;
-}
+/* ── Welcome ── */
+.welcome-card { max-width:560px; margin:0 auto; text-align:center; padding:64px 24px 48px; }
+.welcome-glyph { width:76px; height:76px; border-radius:22px; background:var(--accent-lt); border:1px solid rgba(108,142,245,.25); display:flex; align-items:center; justify-content:center; font-size:36px; margin:0 auto 26px; box-shadow:0 4px 16px var(--accent-glow); }
+.welcome-h { font-family:'Lora',Georgia,serif; font-size:30px; font-weight:600; color:var(--text); margin:0 0 12px; line-height:1.25; }
 .welcome-h em { font-style:italic; color:var(--accent); }
 .welcome-p { font-size:15px; color:var(--text2); line-height:1.7; margin:0 0 28px; }
 .welcome-chips { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; }
-.welcome-chip {
-  background:var(--surface2); border:1px solid var(--border2);
-  border-radius:8px; padding:8px 14px;
-  font-size:12px; color:var(--text2);
-}
+.welcome-chip { background:var(--surface2); border:1px solid var(--border2); border-radius:8px; padding:8px 14px; font-size:12px; color:var(--text2); }
 
-/* ── Chat messages ── */
+/* ── Chat bubbles ── */
 .msg-row { display:flex; margin-bottom:24px; align-items:flex-start; }
 .msg-row-user { justify-content:flex-end; }
 .msg-row-ai   { justify-content:flex-start; }
-
-.bubble { max-width:68%; padding:14px 18px; font-size:14px; line-height:1.75; border-radius:var(--r-lg); }
-
-.bubble-user {
-  background: linear-gradient(135deg,var(--accent),var(--accent2));
-  color: #fff !important;
-  border-radius: var(--r-lg) var(--r-lg) 5px var(--r-lg);
-  box-shadow: 0 4px 16px var(--accent-glow);
-  font-weight: 500;
-}
-
-.bubble-ai {
-  background: var(--surface2);
-  border: 1px solid var(--border2);
-  color: var(--text) !important;
-  border-radius: 5px var(--r-lg) var(--r-lg) var(--r-lg);
-  box-shadow: var(--sh);
-}
-
-.avatar {
-  width:34px; height:34px; border-radius:50%;
-  display:flex; align-items:center; justify-content:center;
-  font-size:16px; flex-shrink:0; margin-top:4px;
-}
+.bubble { max-width:70%; padding:14px 18px; font-size:14px; line-height:1.75; border-radius:var(--r-lg); }
+.bubble-user { background: linear-gradient(135deg,var(--accent),var(--accent2)); color: #fff !important; border-radius: var(--r-lg) var(--r-lg) 5px var(--r-lg); box-shadow: 0 4px 16px var(--accent-glow); font-weight: 500; }
+.bubble-ai { background: var(--surface2); border: 1px solid var(--border2); color: var(--text) !important; border-radius: 5px var(--r-lg) var(--r-lg) var(--r-lg); box-shadow: var(--sh); }
+.avatar { width:34px; height:34px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:16px; flex-shrink:0; margin-top:4px; }
 .avatar-user { background:var(--accent-lt); margin-left:10px; order:2; }
 .avatar-ai   { background:linear-gradient(135deg,var(--accent),var(--accent2)); box-shadow:0 2px 8px var(--accent-glow); margin-right:10px; }
+.ai-label { font-size:10px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:var(--accent) !important; margin-bottom:6px; }
+.src-bar  { display:flex; flex-wrap:wrap; gap:5px; margin-top:12px; padding-top:10px; border-top:1px solid var(--border); }
+.src-chip { background:var(--accent-lt); border:1px solid rgba(108,142,245,.25); border-radius:6px; padding:2px 9px; font-size:11px; color:var(--accent) !important; font-weight:500; }
 
-.ai-label {
-  font-size:10px; font-weight:700; letter-spacing:.1em;
-  text-transform:uppercase; color:var(--accent) !important; margin-bottom:6px;
-}
+/* ── Q-Bank cards ── */
+.qcard { background:var(--surface2); border:1px solid var(--border2); border-radius:12px; padding:18px 20px; margin-bottom:12px; }
+.qcard-num { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.1em; color:var(--text3) !important; margin-bottom:6px; }
+.qcard-q { font-size:14px; font-weight:600; color:var(--text) !important; margin-bottom:10px; line-height:1.5; }
+.qcard-opt { font-size:13px; color:var(--text2) !important; padding:4px 0; }
+.qcard-opt-correct { color:var(--sage) !important; font-weight:600; }
+.qmark { background:var(--gold-lt); color:var(--gold) !important; border-radius:6px; padding:2px 8px; font-size:11px; font-weight:700; }
+.answer-box { background:var(--surface3); border-left:3px solid var(--sage); border-radius:0 8px 8px 0; padding:10px 14px; margin-top:10px; font-size:13px; color:var(--text) !important; line-height:1.6; }
+.kpoint { display:flex; align-items:flex-start; gap:8px; font-size:12px; color:var(--text2) !important; margin-top:4px; }
 
-/* source chips */
-.src-bar { display:flex; flex-wrap:wrap; gap:5px; margin-top:12px; padding-top:10px; border-top:1px solid var(--border); }
-.src-chip {
-  background:var(--accent-lt); border:1px solid rgba(108,142,245,.25);
-  border-radius:6px; padding:2px 9px;
-  font-size:11px; color:var(--accent) !important; font-weight:500;
-}
-
-/* ask button */
-.ask-btn-wrap .stButton > button {
-  background: linear-gradient(135deg,var(--accent),var(--accent2)) !important;
-  color: #fff !important; border:none !important;
-  border-radius: 11px !important; padding: 12px 24px !important;
-  font-family: 'Sora', sans-serif !important;
-  font-size:13px !important; font-weight:700 !important;
-  box-shadow: 0 3px 10px var(--accent-glow) !important;
-  transition: opacity .15s, transform .1s !important;
-}
-.ask-btn-wrap .stButton > button:hover { opacity:.88 !important; transform:translateY(-1px) !important; }
-
-/* ── Upload view ── */
-.ucard-title {
-  font-family:'Lora',Georgia,serif;
-  font-size:22px; font-weight:600; color:var(--text);
-  margin:0 0 6px;
-}
+/* ── Upload ── */
+.ucard-title { font-family:'Lora',Georgia,serif; font-size:22px; font-weight:600; color:var(--text); margin:0 0 6px; }
 .ucard-sub { font-size:13px; color:var(--text2); margin-bottom:20px; line-height:1.6; }
-
-[data-testid="stFileUploader"] > div {
-  background: var(--surface2) !important;
-  border: 2px dashed var(--border2) !important;
-  border-radius: 14px !important;
-  padding: 36px 28px !important;
-  transition: border-color .2s, background .2s !important;
-}
-[data-testid="stFileUploader"] > div:hover {
-  border-color: var(--accent) !important;
-  background: var(--accent-lt) !important;
-}
-
-/* file result pills */
-.fpill {
-  display:flex; align-items:center; gap:10px;
-  background:var(--surface2); border:1px solid var(--border);
-  border-radius:10px; padding:10px 14px; margin-bottom:6px;
-  font-size:13px; box-shadow:var(--sh);
-}
+.fpill { display:flex; align-items:center; gap:10px; background:var(--surface2); border:1px solid var(--border); border-radius:10px; padding:10px 14px; margin-bottom:6px; font-size:13px; box-shadow:var(--sh); }
 .fpill-ok  { border-color:rgba(78,203,141,.3);  background:var(--sage-lt); }
 .fpill-err { border-color:rgba(240,112,112,.3); background:var(--rose-lt); }
 .fpill-name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text) !important; }
-.fpill-ext {
-  background:var(--accent-lt); color:var(--accent) !important;
-  border-radius:5px; padding:2px 8px;
-  font-size:10px; font-weight:700; letter-spacing:.06em;
-}
-.fpill-chunks {
-  background:var(--sage-lt); color:var(--sage) !important;
-  border-radius:5px; padding:2px 8px; font-size:11px; font-weight:600;
-}
+.fpill-ext { background:var(--accent-lt); color:var(--accent) !important; border-radius:5px; padding:2px 8px; font-size:10px; font-weight:700; }
+.fpill-chunks { background:var(--sage-lt); color:var(--sage) !important; border-radius:5px; padding:2px 8px; font-size:11px; font-weight:600; }
 
-/* process button */
-.proc-btn-wrap .stButton > button {
-  background: linear-gradient(135deg,var(--accent),var(--accent2)) !important;
-  color:#fff !important; border:none !important;
-  border-radius:11px !important; padding:13px 28px !important;
-  font-family:'Sora',sans-serif !important;
-  font-size:14px !important; font-weight:700 !important;
-  box-shadow:0 4px 14px var(--accent-glow) !important;
-  transition:opacity .15s, transform .1s !important;
-}
-.proc-btn-wrap .stButton > button:hover { opacity:.88 !important; transform:translateY(-1px) !important; }
-
-/* how it works card */
-.how-card {
-  background: var(--surface2);
-  border: 1px solid var(--border2);
-  border-radius:14px; padding:22px 24px; box-shadow:var(--sh);
-}
-.how-card-title {
-  font-size:11px; font-weight:700; color:var(--text3) !important;
-  letter-spacing:.12em; text-transform:uppercase; margin-bottom:16px;
-}
+/* ── How-it-works ── */
+.how-card { background: var(--surface2); border: 1px solid var(--border2); border-radius:14px; padding:22px 24px; box-shadow:var(--sh); }
+.how-card-title { font-size:11px; font-weight:700; color:var(--text3) !important; letter-spacing:.12em; text-transform:uppercase; margin-bottom:16px; }
 .how-step { display:flex; align-items:flex-start; gap:12px; margin-bottom:14px; }
-.how-step:last-child { margin-bottom:0; }
-.how-num {
-  width:26px; height:26px; border-radius:50%;
-  background:var(--accent-lt); color:var(--accent) !important;
-  font-size:12px; font-weight:700;
-  display:flex; align-items:center; justify-content:center;
-  flex-shrink:0; margin-top:1px;
-  border:1px solid rgba(108,142,245,.25);
-}
+.how-num { width:26px; height:26px; border-radius:50%; background:var(--accent-lt); color:var(--accent) !important; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; flex-shrink:0; border:1px solid rgba(108,142,245,.25); }
 .how-text { font-size:13px; color:var(--text2) !important; line-height:1.6; }
 .how-text strong { color:var(--text) !important; font-weight:600; }
-
-/* format badges */
-.fmt-pdf  { background:var(--rose-lt);  color:var(--rose)   !important; }
-.fmt-docx { background:var(--accent-lt);color:var(--accent) !important; }
-.fmt-pptx { background:var(--gold-lt);  color:var(--gold)   !important; }
-.fmt-txt  { background:var(--sage-lt);  color:var(--sage)   !important; }
 .fmt-badge { border-radius:6px; padding:3px 10px; font-size:12px; font-weight:700; }
+.fmt-pdf { background:var(--rose-lt); color:var(--rose) !important; } .fmt-docx { background:var(--accent-lt); color:var(--accent) !important; } .fmt-pptx { background:var(--gold-lt); color:var(--gold) !important; } .fmt-txt { background:var(--sage-lt); color:var(--sage) !important; }
+
+/* ── KG Legend ── */
+.kg-legend { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0 16px; }
+.kg-dot { width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:5px; }
+.kg-item { display:flex; align-items:center; font-size:12px; color:var(--text2) !important; background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:4px 10px; }
+
+/* ── Section header ── */
+.sec-header { font-family:'Lora',Georgia,serif; font-size:20px; font-weight:600; color:var(--text); margin-bottom:6px; }
+.sec-sub { font-size:13px; color:var(--text2); margin-bottom:20px; }
+
+/* ── Assessment header ── */
+.assess-header { background:var(--surface2); border:1px solid var(--border2); border-radius:14px; padding:20px 24px; margin-bottom:20px; }
+.assess-title { font-family:'Lora',serif; font-size:18px; font-weight:600; color:var(--text) !important; margin-bottom:8px; }
+.assess-marks { font-size:13px; color:var(--text2) !important; }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 #  HELPERS
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 def file_icon(name: str) -> tuple:
     ext = Path(name).suffix.lower()
     return {
@@ -533,9 +280,23 @@ def file_icon(name: str) -> tuple:
     }.get(ext, ("📁", "fi-gen"))
 
 
-# ══════════════════════════════════════════════════════
+MODE_META = {
+    "explain":    {"icon": "📖", "label": "Explain",    "color": "var(--accent)"},
+    "exam":       {"icon": "📝", "label": "Exam Q",     "color": "var(--gold)"},
+    "synthesize": {"icon": "🔀", "label": "Synthesize", "color": "var(--sage)"},
+    "exam_map":   {"icon": "🗺️", "label": "Exam Map",   "color": "var(--purple)"},
+}
+
+LEVEL_META = {
+    "beginner":     {"icon": "🌱", "label": "Beginner",     "cls": "level-beginner"},
+    "intermediate": {"icon": "📚", "label": "Intermediate", "cls": "level-intermediate"},
+    "advanced":     {"icon": "🔬", "label": "Advanced",     "cls": "level-advanced"},
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  SIDEBAR
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown("""
     <div class="sb-logo">
@@ -551,28 +312,39 @@ with st.sidebar:
 
     st.markdown(f"""
     <div class="sb-stats">
-      <div class="sb-stat">
-        <div class="sb-stat-n">{stats["documents"]}</div>
-        <div class="sb-stat-l">Docs</div>
-      </div>
-      <div class="sb-stat">
-        <div class="sb-stat-n">{stats["chunks"]}</div>
-        <div class="sb-stat-l">Chunks</div>
-      </div>
+      <div class="sb-stat"><div class="sb-stat-n">{stats["documents"]}</div><div class="sb-stat-l">Docs</div></div>
+      <div class="sb-stat"><div class="sb-stat-n">{stats["chunks"]}</div><div class="sb-stat-l">Chunks</div></div>
     </div>
     """, unsafe_allow_html=True)
 
-    if st.session_state.indexed:
-        st.markdown('<span class="status-pill status-on"><span class="status-dot"></span> Active</span>', unsafe_allow_html=True)
-    else:
-        st.markdown('<span class="status-pill status-off"><span class="status-dot"></span> No docs indexed</span>', unsafe_allow_html=True)
+    pill_cls = "status-on" if st.session_state.indexed else "status-off"
+    pill_txt = "Active" if st.session_state.indexed else "No docs indexed"
+    st.markdown(f'<span class="status-pill {pill_cls}"><span class="status-dot"></span> {pill_txt}</span>', unsafe_allow_html=True)
 
+    # ── Subject / Chapter filters ──────────────────────────────────────────
+    if stats["subjects"]:
+        st.markdown('<span class="sb-sec">Filters</span>', unsafe_allow_html=True)
+        subject_opts = ["All Subjects"] + stats["subjects"]
+        sel_subj = st.selectbox("Subject", subject_opts, label_visibility="collapsed",
+                                key="sb_subject_select")
+        st.session_state.subject_filter = None if sel_subj == "All Subjects" else sel_subj
+
+        # Chapter filter (dynamic based on subject)
+        if st.session_state.subject_filter:
+            chapters = stats["chapters_by_subject"].get(st.session_state.subject_filter, [])
+            if chapters:
+                chap_opts = ["All Chapters"] + chapters
+                sel_chap = st.selectbox("Chapter", chap_opts, label_visibility="collapsed",
+                                        key="sb_chapter_select")
+                st.session_state.chapter_filter = None if sel_chap == "All Chapters" else sel_chap
+
+    # ── Indexed files ─────────────────────────────────────────────────────
     st.markdown('<span class="sb-sec">Indexed Files</span>', unsafe_allow_html=True)
     st.markdown('<div class="sb-files">', unsafe_allow_html=True)
     if stats["sources"]:
         for s in stats["sources"]:
             ico, cls = file_icon(s)
-            display = s if len(s) <= 26 else s[:23] + "…"
+            display  = s if len(s) <= 26 else s[:23] + "…"
             st.markdown(f"""
             <div class="sb-file-row">
               <span class="sb-file-icon {cls}">{ico}</span>
@@ -585,122 +357,92 @@ with st.sidebar:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("🗑  Clear Knowledge Base", use_container_width=True):
         import vector_store as vs
-        vs.chunks_store.clear()
-        vs.metadata_store.clear()
-        vs.faiss_index = None
-        st.session_state.history = []
-        st.session_state.indexed = False
+        vs.chunks_store.clear(); vs.metadata_store.clear(); vs.faiss_index = None
+        st.session_state.history = []; st.session_state.indexed = False
+        st.session_state.kg_data = None; st.session_state.lp_result = None
+        st.session_state.qb_result = None
         st.rerun()
 
     st.markdown("""
     <p style="font-size:11px;color:var(--text3)!important;margin-top:20px;line-height:1.7;padding:0 4px;">
     Supports <strong style="color:var(--text2)!important;">PDF · DOCX · PPTX · TXT</strong><br>
-    Powered by Gemini + FAISS
+    Powered by Gemini 2.5 + FAISS
     </p>""", unsafe_allow_html=True)
 
 
-# ══════════════════════════════════════════════════════
-#  TOP BAR
-# ══════════════════════════════════════════════════════
-tb_l, tb_m, tb_r = st.columns([2, 2, 2])
+# ══════════════════════════════════════════════════════════════════════════════
+#  TOP NAV BAR
+# ══════════════════════════════════════════════════════════════════════════════
+nav_items = [
+    ("chat",             "💬 Chat"),
+    ("upload",           "📤 Upload"),
+    ("learning_path",    "🗺️ Learning Path"),
+    ("qbank",            "📋 Q-Bank"),
+    ("knowledge_graph",  "🕸️ Knowledge Graph"),
+]
 
-with tb_l:
+tb_logo, *tb_cols = st.columns([1.4] + [1] * len(nav_items))
+with tb_logo:
     st.markdown("""
     <div style="padding:14px 0 10px;">
-      <span style="font-family:'Lora',serif;font-size:18px;font-weight:600;color:var(--text);">
+      <span style="font-family:'Lora',serif;font-size:17px;font-weight:600;color:var(--text);">
         Scholar <em style="font-style:italic;color:var(--accent);">AI</em>
       </span>
     </div>""", unsafe_allow_html=True)
 
-with tb_m:
-    vc1, vc2 = st.columns(2)
-    with vc1:
-        if st.button("💬  Chat", use_container_width=True,
-                     type="primary" if st.session_state.view == "chat" else "secondary"):
-            st.session_state.view = "chat"; st.rerun()
-    with vc2:
-        if st.button("📤  Upload", use_container_width=True,
-                     type="primary" if st.session_state.view == "upload" else "secondary"):
-            st.session_state.view = "upload"; st.rerun()
-
-with tb_r:
-    mc1, mc2 = st.columns(2)
-    with mc1:
-        if st.button("📖 Explain", use_container_width=True,
-                     type="primary" if st.session_state.mode == "explain" else "secondary"):
-            st.session_state.mode = "explain"; st.rerun()
-    with mc2:
-        if st.button("📝 Exam Q", use_container_width=True,
-                     type="primary" if st.session_state.mode == "exam" else "secondary"):
-            st.session_state.mode = "exam"; st.rerun()
+for col, (view_key, view_label) in zip(tb_cols, nav_items):
+    with col:
+        is_active = st.session_state.view == view_key
+        if st.button(view_label, use_container_width=True,
+                     type="primary" if is_active else "secondary",
+                     key=f"nav_{view_key}"):
+            st.session_state.view = view_key
+            st.rerun()
 
 st.markdown('<hr style="margin:0 !important;">', unsafe_allow_html=True)
 
 
-# ══════════════════════════════════════════════════════
-#  UPLOAD VIEW
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+#  VIEW: UPLOAD
+# ══════════════════════════════════════════════════════════════════════════════
 if st.session_state.view == "upload":
     st.markdown('<div style="padding:32px 44px;">', unsafe_allow_html=True)
-
     col_up, col_how = st.columns([3, 2], gap="large")
 
     with col_up:
-        st.markdown("""
-        <div class="ucard-title">📤 Upload Study Materials</div>
-        <div class="ucard-sub">Drag & drop or browse your files. Supports PDF, DOCX, PPTX, and TXT.</div>
-        """, unsafe_allow_html=True)
-
-        files = st.file_uploader(
-            "Drop files here",
-            type=["pdf", "docx", "pptx", "txt"],
-            accept_multiple_files=True,
-            label_visibility="collapsed",
-        )
-
+        st.markdown('<div class="ucard-title">📤 Upload Study Materials</div>', unsafe_allow_html=True)
+        st.markdown('<div class="ucard-sub">Drag & drop or browse your files. Supports PDF, DOCX, PPTX, and TXT.</div>', unsafe_allow_html=True)
+        files = st.file_uploader("Drop files here", type=["pdf","docx","pptx","txt"],
+                                 accept_multiple_files=True, label_visibility="collapsed")
         if files:
             for f in files:
                 ext = Path(f.name).suffix.upper().lstrip(".")
-                st.markdown(
-                    f'<div class="fpill">📄 <span class="fpill-name">{f.name}</span>'
-                    f'<span class="fpill-ext">{ext}</span></div>',
-                    unsafe_allow_html=True
-                )
+                st.markdown(f'<div class="fpill">📄 <span class="fpill-name">{f.name}</span><span class="fpill-ext">{ext}</span></div>', unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown('<div class="proc-btn-wrap">', unsafe_allow_html=True)
-        process_btn = st.button("⚡  Process & Index Documents", use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+        process_btn = st.button("⚡  Process & Index Documents", use_container_width=True, type="primary")
 
         if process_btn and files:
             new_docs = []
             prog = st.progress(0, text="Reading files…")
             for i, file in enumerate(files):
                 with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.name).suffix) as tmp:
-                    tmp.write(file.read())
-                    path = tmp.name
+                    tmp.write(file.read()); path = tmp.name
                 try:
-                    doc = process_document(path)
-                    doc["filename"] = file.name
+                    doc = process_document(path); doc["filename"] = file.name
                     new_docs.append(doc)
-                    st.markdown(
-                        f'<div class="fpill fpill-ok">✅ <span class="fpill-name">{file.name}</span>'
-                        f'<span class="fpill-chunks">{doc["num_chunks"]} chunks</span></div>',
-                        unsafe_allow_html=True
-                    )
+                    st.markdown(f'<div class="fpill fpill-ok">✅ <span class="fpill-name">{file.name}</span><span class="fpill-chunks">{doc["num_chunks"]} chunks</span></div>', unsafe_allow_html=True)
                 except Exception as e:
-                    st.markdown(
-                        f'<div class="fpill fpill-err">❌ <span class="fpill-name">{file.name}: {e}</span></div>',
-                        unsafe_allow_html=True
-                    )
+                    st.markdown(f'<div class="fpill fpill-err">❌ <span class="fpill-name">{file.name}: {e}</span></div>', unsafe_allow_html=True)
                 finally:
                     os.unlink(path)
-                prog.progress((i + 1) / len(files), text=f"Processing {i+1}/{len(files)}…")
+                prog.progress((i+1)/len(files), text=f"Processing {i+1}/{len(files)}…")
 
             if new_docs:
                 with st.spinner("Embedding & building vector index…"):
                     add_documents(new_docs)
                 st.session_state.indexed = True
+                st.session_state.kg_data = None  # Invalidate cached KG
                 prog.empty()
                 st.success(f"🎉 {len(new_docs)} document(s) indexed! Switch to Chat to ask questions.")
         elif process_btn and not files:
@@ -711,20 +453,10 @@ if st.session_state.view == "upload":
         <div style="margin-top:42px;">
           <div class="how-card">
             <div class="how-card-title">How it works</div>
-            <div class="how-step">
-              <div class="how-num">1</div>
-              <div class="how-text"><strong>Upload</strong> your PDFs, notes, slides, or textbooks.</div>
-            </div>
-            <div class="how-step">
-              <div class="how-num">2</div>
-              <div class="how-text"><strong>Process</strong> — Scholar AI chunks, embeds, and indexes your content.</div>
-            </div>
-            <div class="how-step">
-              <div class="how-num">3</div>
-              <div class="how-text"><strong>Ask</strong> any question in the Chat tab.</div>
-            </div>
+            <div class="how-step"><div class="how-num">1</div><div class="how-text"><strong>Upload</strong> your PDFs, notes, slides, or textbooks.</div></div>
+            <div class="how-step"><div class="how-num">2</div><div class="how-text"><strong>Process</strong> — Scholar AI chunks, embeds, and indexes your content.</div></div>
+            <div class="how-step"><div class="how-num">3</div><div class="how-text"><strong>Ask</strong> anything in Chat, generate a Learning Path, or build a Q-Bank.</div></div>
           </div>
-
           <div class="how-card" style="margin-top:14px;">
             <div class="how-card-title">Supported formats</div>
             <div style="display:flex;flex-wrap:wrap;gap:7px;margin-top:4px;">
@@ -734,103 +466,416 @@ if st.session_state.view == "upload":
               <span class="fmt-badge fmt-txt">TXT</span>
             </div>
           </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════
-#  CHAT VIEW
-# ══════════════════════════════════════════════════════
-else:
-    if not st.session_state.history:
-        mode_hint = (
-            "Ask me to explain any topic from your uploaded documents."
-            if st.session_state.mode == "explain"
-            else "Paste an exam question — I'll write a mark-scheme-aware answer."
-        )
-        st.markdown(f"""
-        <div class="welcome-card">
-          <div class="welcome-glyph">🎓</div>
-          <h2 class="welcome-h">Ask <em>Scholar AI</em> anything</h2>
-          <p class="welcome-p">{mode_hint}<br>Upload your materials first, then ask away.</p>
-          <div class="welcome-chips">
-            <span class="welcome-chip">📖 Topic explanations</span>
-            <span class="welcome-chip">📝 Exam question solving</span>
-            <span class="welcome-chip">📚 Source-grounded answers</span>
+          <div class="how-card" style="margin-top:14px;">
+            <div class="how-card-title">Week 3-4 New Features</div>
+            <div class="how-step"><div class="how-num">🔀</div><div class="how-text"><strong>Synthesize</strong> topics across multiple uploaded documents.</div></div>
+            <div class="how-step"><div class="how-num">🗺️</div><div class="how-text"><strong>Learning Path</strong> — theory → examples → self-assessment.</div></div>
+            <div class="how-step"><div class="how-num">📋</div><div class="how-text"><strong>Q-Bank</strong> — auto-generate MCQ, short & long answer questions.</div></div>
+            <div class="how-step"><div class="how-num">🕸️</div><div class="how-text"><strong>Knowledge Graph</strong> — visual map of topic relationships.</div></div>
           </div>
         </div>
         """, unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    # message history
-    for item in st.session_state.history:
-        mode_lbl = "Explain Topic" if item["mode"] == "explain" else "Exam Answer"
 
-        # user bubble
-        st.markdown(f"""
-        <div class="msg-row msg-row-user">
-          <div class="bubble bubble-user">{item["q"]}</div>
-          <div class="avatar avatar-user">🧑</div>
-        </div>""", unsafe_allow_html=True)
+# ══════════════════════════════════════════════════════════════════════════════
+#  VIEW: CHAT
+# ══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.view == "chat":
+    # ── Mode + Level bar ──────────────────────────────────────────────────
+    mode_cols = st.columns(4, gap="small")
+    mode_keys = ["explain", "exam", "synthesize", "exam_map"]
+    mode_labels = ["📖 Explain", "📝 Exam Q", "🔀 Synthesize", "🗺️ Exam Map"]
+    for col, mk, ml in zip(mode_cols, mode_keys, mode_labels):
+        with col:
+            if st.button(ml, use_container_width=True,
+                         type="primary" if st.session_state.mode == mk else "secondary",
+                         key=f"mode_{mk}"):
+                st.session_state.mode = mk; st.rerun()
 
-        # ai label
-        st.markdown(f'<div class="ai-label" style="margin-left:44px;">Scholar AI · {mode_lbl}</div>', unsafe_allow_html=True)
-
-        # ai answer — use st.container for proper markdown rendering
-        with st.container():
-            col_av, col_ans = st.columns([0.06, 0.94])
-            with col_av:
-                st.markdown('<div class="avatar avatar-ai" style="margin-top:2px;">🤖</div>', unsafe_allow_html=True)
-            with col_ans:
-                st.markdown(
-                    '<div style="background:var(--surface2);border:1px solid var(--border2);'
-                    'color:var(--text);padding:16px 20px;border-radius:5px 14px 14px 14px;'
-                    'font-size:14px;line-height:1.75;box-shadow:var(--sh);">',
-                    unsafe_allow_html=True
-                )
-                st.markdown(item["a"])
-                if item.get("sources"):
-                    seen = {s["source"]: s for s in item["sources"]}
-                    chips = "".join(f'<span class="src-chip">📄 {s["source"]}</span>' for s in seen.values())
-                    st.markdown(f'<div class="src-bar">{chips}</div>', unsafe_allow_html=True)
-                st.markdown("</div>", unsafe_allow_html=True)
-
-    # input bar
-    st.markdown('<hr style="margin:8px 0 16px !important;">', unsafe_allow_html=True)
-
-    inp_col, btn_col = st.columns([4, 1], gap="small")
-    with inp_col:
-        placeholder_txt = (
-            "Explain a topic from your documents…"
-            if st.session_state.mode == "explain"
-            else "Paste your exam question here… (e.g. 8 marks)"
-        )
-        query = st.text_area(
-            "query", placeholder=placeholder_txt,
-            label_visibility="collapsed", key="chat_input",
-            height=120,
-        )
-    with btn_col:
-        st.markdown('<div class="ask-btn-wrap">', unsafe_allow_html=True)
-        ask_btn = st.button("Send →", use_container_width=True)
+    # Show level selector only for explain / synthesize
+    if st.session_state.mode in ("explain", "synthesize"):
+        st.markdown('<div style="display:flex;align-items:center;gap:8px;margin:8px 0 0;padding:0 2px;">'
+                    '<span style="font-size:11px;color:var(--text3)!important;font-weight:700;text-transform:uppercase;letter-spacing:.1em;">Level:</span>', unsafe_allow_html=True)
+        lv_cols = st.columns([1, 1, 1, 5], gap="small")
+        for col, lk in zip(lv_cols[:3], ["beginner", "intermediate", "advanced"]):
+            lm = LEVEL_META[lk]
+            with col:
+                if st.button(f"{lm['icon']} {lm['label']}", use_container_width=True,
+                             type="primary" if st.session_state.level == lk else "secondary",
+                             key=f"level_{lk}"):
+                    st.session_state.level = lk; st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
-    mode_desc = "Explain Topic — structured explanation with examples" if st.session_state.mode == "explain" \
-        else "Solve Exam Question — mark-scheme-aware full answer"
-    st.markdown(f'<p style="font-size:11px;color:var(--text3)!important;margin-top:4px;">Mode: <strong style="color:var(--text2)!important;">{mode_desc}</strong></p>', unsafe_allow_html=True)
+    st.markdown('<hr style="margin:8px 0 0 !important;">', unsafe_allow_html=True)
+    chat_area = st.container()
+
+    with chat_area:
+        if not st.session_state.history:
+            mode_info = {
+                "explain":    "Ask me to <strong>explain</strong> any topic from your materials.",
+                "exam":       "Paste an <strong>exam question</strong> — I'll write a model answer.",
+                "synthesize": "I'll <strong>synthesise</strong> a topic across all your uploaded docs.",
+                "exam_map":   "I'll map a topic to <strong>likely exam patterns</strong> and high-yield content.",
+            }
+            st.markdown(f"""
+            <div class="welcome-card">
+              <div class="welcome-glyph">🎓</div>
+              <h2 class="welcome-h">Ask <em>Scholar AI</em> anything</h2>
+              <p class="welcome-p">{mode_info[st.session_state.mode]}<br>Upload your materials first, then ask away.</p>
+              <div class="welcome-chips">
+                <span class="welcome-chip">📖 Topic explanations</span>
+                <span class="welcome-chip">📝 Exam solving</span>
+                <span class="welcome-chip">🔀 Multi-source synthesis</span>
+                <span class="welcome-chip">🗺️ Exam pattern mapping</span>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+        for item in st.session_state.history:
+            mm   = MODE_META.get(item["mode"], MODE_META["explain"])
+            lm   = LEVEL_META.get(item.get("level", "intermediate"), LEVEL_META["intermediate"])
+            lbl  = f"{mm['icon']} {mm['label']}"
+            if item["mode"] in ("explain", "synthesize"):
+                lbl += f" · {lm['icon']} {lm['label']}"
+
+            st.markdown(f'<div class="msg-row msg-row-user"><div class="bubble bubble-user">{item["q"]}</div><div class="avatar avatar-user">🧑</div></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="ai-label" style="margin-left:44px;">Scholar AI · {lbl}</div>', unsafe_allow_html=True)
+
+            with st.container():
+                col_av, col_ans = st.columns([0.05, 0.95])
+                with col_av:
+                    st.markdown('<div class="avatar avatar-ai" style="margin-top:2px;">🤖</div>', unsafe_allow_html=True)
+                with col_ans:
+                    st.markdown('<div style="background:var(--surface2);border:1px solid var(--border2);color:var(--text);padding:16px 20px;border-radius:5px 14px 14px 14px;font-size:14px;line-height:1.75;box-shadow:var(--sh);">', unsafe_allow_html=True)
+                    st.markdown(item["a"])
+                    if item.get("sources"):
+                        seen  = {s["source"]: s for s in item["sources"]}
+                        chips = "".join(f'<span class="src-chip">📄 {s["source"]}</span>' for s in seen.values())
+                        st.markdown(f'<div class="src-bar">{chips}</div>', unsafe_allow_html=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── Input bar ──────────────────────────────────────────────────────────
+    st.markdown('<hr style="margin:8px 0 12px !important;">', unsafe_allow_html=True)
+    placeholders = {
+        "explain":    "Ask about a topic (e.g. 'Explain binary search trees')…",
+        "exam":       "Paste your exam question here (e.g. '8 marks — Explain normalisation')…",
+        "synthesize": "Enter a topic to synthesise across all your documents…",
+        "exam_map":   "Enter a topic to map to exam patterns and high-yield content…",
+    }
+
+    inp_c, btn_c = st.columns([5, 1], gap="small")
+    with inp_c:
+        query = st.text_area("query", placeholder=placeholders[st.session_state.mode],
+                             label_visibility="collapsed", key="chat_input", height=100)
+    with btn_c:
+        ask_btn = st.button("Send →", use_container_width=True, type="primary")
+
+    mode_desc_map = {
+        "explain":    f"Explain Topic — {st.session_state.level} level",
+        "exam":       "Solve Exam Question — full mark-scheme answer",
+        "synthesize": f"Cross-Document Synthesis — {st.session_state.level} level",
+        "exam_map":   "Exam Pattern Mapping — high-yield analysis",
+    }
+    st.markdown(f'<p style="font-size:11px;color:var(--text3)!important;margin-top:4px;">Mode: <strong style="color:var(--text2)!important;">{mode_desc_map[st.session_state.mode]}</strong></p>', unsafe_allow_html=True)
 
     if ask_btn and query:
         if not st.session_state.indexed:
-            st.warning("⚠️ Please switch to the Upload tab and index your documents first.")
+            st.warning("⚠️ Please go to Upload tab and index your documents first.")
         else:
+            subj  = st.session_state.subject_filter
+            level = st.session_state.level
             with st.spinner("Scholar AI is thinking…"):
                 if st.session_state.mode == "explain":
-                    answer, sources = answer_topic(query)
-                else:
-                    answer, sources = solve_question(query)
+                    answer, sources = answer_topic(query, level=level, subject=subj)
+                elif st.session_state.mode == "exam":
+                    answer, sources = solve_question(query, subject=subj)
+                elif st.session_state.mode == "synthesize":
+                    answer, sources = synthesize_topic(query)
+                else:  # exam_map
+                    answer, sources = map_topic_to_exam(query, subject=subj)
+
             st.session_state.history.append({
-                "q": query, "a": answer,
-                "sources": sources, "mode": st.session_state.mode,
+                "q": query, "a": answer, "sources": sources,
+                "mode": st.session_state.mode, "level": level,
             })
             st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  VIEW: LEARNING PATH
+# ══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.view == "learning_path":
+    st.markdown('<div style="padding:32px 44px 20px;">', unsafe_allow_html=True)
+    st.markdown('<div class="sec-header">🗺️ Learning Path Generator</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-sub">Enter any topic to get a structured learning journey: Theory → Worked Examples → Self-Assessment.</div>', unsafe_allow_html=True)
+
+    lp_col1, lp_col2, lp_col3 = st.columns([3, 1, 1], gap="small")
+    with lp_col1:
+        lp_topic = st.text_input("Topic", placeholder="e.g. Binary Search Trees, Normalization, Newton's Laws…", label_visibility="collapsed")
+    with lp_col2:
+        lp_level = st.selectbox("Level", ["Beginner", "Intermediate", "Advanced"], index=1, label_visibility="collapsed")
+    with lp_col3:
+        lp_btn = st.button("Generate Path →", use_container_width=True, type="primary")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if lp_btn and lp_topic:
+        if not st.session_state.indexed:
+            st.warning("⚠️ Please upload and index documents first.")
+        else:
+            with st.spinner(f"Building learning path for '{lp_topic}'…"):
+                result, sources = generate_learning_path(
+                    lp_topic, subject=st.session_state.subject_filter
+                )
+            st.session_state.lp_result = {"topic": lp_topic, "level": lp_level,
+                                           "result": result, "sources": sources}
+
+    if lp_btn and not lp_topic:
+        st.warning("Please enter a topic first.")
+
+    # ── Also show Prerequisites ──────────────────────────────────────────
+    if st.session_state.lp_result:
+        data = st.session_state.lp_result
+        st.markdown(f'<div style="padding:0 44px;">', unsafe_allow_html=True)
+
+        tab1, tab2 = st.tabs(["📖 Learning Path", "🔑 Prerequisites"])
+
+        with tab1:
+            st.markdown(
+                f'<div style="background:var(--surface2);border:1px solid var(--border2);'
+                f'border-radius:14px;padding:24px 28px;font-size:14px;line-height:1.8;">',
+                unsafe_allow_html=True
+            )
+            st.markdown(data["result"])
+            if data["sources"]:
+                seen  = {s["source"]: s for s in data["sources"]}
+                chips = "".join(f'<span class="src-chip">📄 {s}</span>' for s in seen)
+                st.markdown(f'<div class="src-bar">{chips}</div>', unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        with tab2:
+            with st.spinner("Identifying prerequisites…"):
+                prereq_result, prereq_src = identify_prerequisites(
+                    data["topic"], subject=st.session_state.subject_filter
+                )
+            st.markdown(
+                '<div style="background:var(--surface2);border:1px solid var(--border2);'
+                'border-radius:14px;padding:24px 28px;font-size:14px;line-height:1.8;">',
+                unsafe_allow_html=True
+            )
+            st.markdown(prereq_result)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  VIEW: Q-BANK
+# ══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.view == "qbank":
+    st.markdown('<div style="padding:32px 44px 20px;">', unsafe_allow_html=True)
+    st.markdown('<div class="sec-header">📋 Question Bank Generator</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-sub">Auto-generate MCQ, short-answer, long-answer, or a full assessment from your study materials.</div>', unsafe_allow_html=True)
+
+    qb_c1, qb_c2, qb_c3, qb_c4 = st.columns([3, 1.5, 1, 1], gap="small")
+    with qb_c1:
+        qb_topic = st.text_input("Topic", placeholder="e.g. Database Normalization, Recursion…", label_visibility="collapsed")
+    with qb_c2:
+        qb_type = st.selectbox("Question Type",
+                               ["MCQ", "Short Answer", "Long Answer", "Full Assessment"],
+                               label_visibility="collapsed")
+    with qb_c3:
+        qb_count = st.selectbox("Count", [3, 5, 8, 10], index=1, label_visibility="collapsed") \
+            if qb_type != "Full Assessment" else st.empty()
+    with qb_c4:
+        qb_btn = st.button("Generate →", use_container_width=True, type="primary")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if qb_btn and qb_topic:
+        if not st.session_state.indexed:
+            st.warning("⚠️ Please upload and index documents first.")
+        else:
+            subj = st.session_state.subject_filter
+            with st.spinner(f"Generating {qb_type} questions on '{qb_topic}'…"):
+                if qb_type == "MCQ":
+                    qs, src = generate_mcq(qb_topic, count=qb_count, subject=subj)
+                    st.session_state.qb_result = {"type": "mcq", "topic": qb_topic, "questions": qs, "sources": src}
+                elif qb_type == "Short Answer":
+                    qs, src = generate_short_answer(qb_topic, count=qb_count, subject=subj)
+                    st.session_state.qb_result = {"type": "short", "topic": qb_topic, "questions": qs, "sources": src}
+                elif qb_type == "Long Answer":
+                    qs, src = generate_long_answer(qb_topic, count=qb_count, subject=subj)
+                    st.session_state.qb_result = {"type": "long", "topic": qb_topic, "questions": qs, "sources": src}
+                else:
+                    assessment, src = generate_full_assessment(qb_topic, subject=subj)
+                    st.session_state.qb_result = {"type": "full", "topic": qb_topic, "assessment": assessment, "sources": src}
+
+    if qb_btn and not qb_topic:
+        st.warning("Please enter a topic first.")
+
+    # ── Render Q-Bank results ─────────────────────────────────────────────
+    if st.session_state.qb_result:
+        data = st.session_state.qb_result
+        st.markdown('<div style="padding:0 44px;">', unsafe_allow_html=True)
+
+        def render_mcq(questions):
+            if not questions:
+                st.warning("No MCQ questions could be generated. Try a different topic."); return
+            for i, q in enumerate(questions, 1):
+                with st.expander(f"Q{i}: {q.get('question','')[:90]}…", expanded=(i==1)):
+                    st.markdown(f'<div class="qcard-q">{q.get("question","")}</div>', unsafe_allow_html=True)
+                    opts = q.get("options", {})
+                    correct = q.get("answer", "")
+                    for key, val in opts.items():
+                        cls = "qcard-opt-correct" if key == correct else "qcard-opt"
+                        prefix = "✅ " if key == correct else f"{key}. "
+                        st.markdown(f'<div class="{cls}">{prefix}{val}</div>', unsafe_allow_html=True)
+                    if q.get("explanation"):
+                        st.markdown(f'<div class="answer-box">💡 {q["explanation"]}</div>', unsafe_allow_html=True)
+
+        def render_short(questions):
+            if not questions:
+                st.warning("No short-answer questions generated."); return
+            for i, q in enumerate(questions, 1):
+                with st.expander(f"Q{i} ({q.get('marks','?')} marks): {q.get('question','')[:80]}…", expanded=(i==1)):
+                    st.markdown(f'<span class="qmark">{q.get("marks","?")} marks</span>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="qcard-q" style="margin-top:8px;">{q.get("question","")}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="answer-box"><strong>Model Answer:</strong><br>{q.get("model_answer","")}</div>', unsafe_allow_html=True)
+                    if q.get("key_points"):
+                        st.markdown('<div style="margin-top:8px;font-size:12px;color:var(--text3)!important;font-weight:700;text-transform:uppercase;letter-spacing:.08em;">Key Points</div>', unsafe_allow_html=True)
+                        for pt in q["key_points"]:
+                            st.markdown(f'<div class="kpoint">• {pt}</div>', unsafe_allow_html=True)
+
+        def render_long(questions):
+            if not questions:
+                st.warning("No long-answer questions generated."); return
+            for i, q in enumerate(questions, 1):
+                with st.expander(f"Q{i} ({q.get('marks','?')} marks)", expanded=(i==1)):
+                    st.markdown(f'<span class="qmark">{q.get("marks","?")} marks</span>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="qcard-q" style="margin-top:8px;">{q.get("question","")}</div>', unsafe_allow_html=True)
+                    if q.get("parts"):
+                        st.markdown('<div style="margin-top:6px;">', unsafe_allow_html=True)
+                        for part in q["parts"]:
+                            st.markdown(f'<div style="font-size:13px;color:var(--text2)!important;padding:2px 0;">{part}</div>', unsafe_allow_html=True)
+                        st.markdown('</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="answer-box" style="margin-top:10px;"><strong>Model Answer:</strong><br>{q.get("model_answer","")}</div>', unsafe_allow_html=True)
+                    if q.get("marking_scheme"):
+                        st.markdown('<div style="margin-top:10px;font-size:12px;color:var(--text3)!important;font-weight:700;text-transform:uppercase;letter-spacing:.08em;">Marking Scheme</div>', unsafe_allow_html=True)
+                        for ms in q["marking_scheme"]:
+                            st.markdown(f'<div class="kpoint">• {ms}</div>', unsafe_allow_html=True)
+
+        if data["type"] == "mcq":
+            st.markdown(f'<div class="sec-header" style="font-size:16px;">📝 MCQ — {data["topic"]}</div>', unsafe_allow_html=True)
+            render_mcq(data["questions"])
+
+        elif data["type"] == "short":
+            st.markdown(f'<div class="sec-header" style="font-size:16px;">✏️ Short Answer — {data["topic"]}</div>', unsafe_allow_html=True)
+            render_short(data["questions"])
+
+        elif data["type"] == "long":
+            st.markdown(f'<div class="sec-header" style="font-size:16px;">📜 Long Answer — {data["topic"]}</div>', unsafe_allow_html=True)
+            render_long(data["questions"])
+
+        elif data["type"] == "full":
+            assessment = data["assessment"]
+            breakdown  = " · ".join(f"{k}: {v}" for k, v in assessment.get("breakdown", {}).items())
+            st.markdown(f"""
+            <div class="assess-header">
+              <div class="assess-title">📋 Full Assessment — {assessment["topic"]}</div>
+              <div class="assess-marks">Total: <strong>{assessment["total_marks"]} marks</strong> &nbsp;|&nbsp; {breakdown}</div>
+            </div>""", unsafe_allow_html=True)
+
+            tab_mcq, tab_sa, tab_la = st.tabs(["📝 Section A: MCQ", "✏️ Section B: Short Answer", "📜 Section C: Long Answer"])
+            with tab_mcq:   render_mcq(assessment.get("mcq", []))
+            with tab_sa:    render_short(assessment.get("short_answer", []))
+            with tab_la:    render_long(assessment.get("long_answer", []))
+
+        # Sources
+        if data.get("sources"):
+            seen  = {s["source"]: s for s in data["sources"]}
+            chips = "".join(f'<span class="src-chip">📄 {s}</span>' for s in seen)
+            st.markdown(f'<div class="src-bar" style="margin-top:20px;">{chips}</div>', unsafe_allow_html=True)
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  VIEW: KNOWLEDGE GRAPH
+# ══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.view == "knowledge_graph":
+    st.markdown('<div style="padding:32px 44px 20px;">', unsafe_allow_html=True)
+    st.markdown('<div class="sec-header">🕸️ Knowledge Graph</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-sub">Visualise the relationships between topics in your study materials.</div>', unsafe_allow_html=True)
+
+    kg_c1, kg_c2, kg_c3 = st.columns([2, 2, 1], gap="small")
+    with kg_c1:
+        kg_topic_filter = st.text_input("Filter by topic (optional)", placeholder="e.g. 'sorting' to focus the graph…", label_visibility="collapsed")
+    with kg_c2:
+        kg_subject_filter = st.text_input("Subject focus (optional)", placeholder="e.g. Computer Science, Mathematics…", label_visibility="collapsed")
+    with kg_c3:
+        kg_btn = st.button("Build Graph →", use_container_width=True, type="primary")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    if kg_btn:
+        if not st.session_state.indexed:
+            st.warning("⚠️ Please upload and index documents first.")
+        else:
+            with st.spinner("Extracting topics and building knowledge graph…"):
+                graph = build_knowledge_graph(subject=kg_subject_filter or None)
+            st.session_state.kg_data = {"graph": graph, "topic_filter": kg_topic_filter}
+
+    if st.session_state.kg_data:
+        kd    = st.session_state.kg_data
+        graph = kd["graph"]
+
+        if graph.get("error"):
+            st.error(graph["error"])
+        elif not graph.get("nodes"):
+            st.info("No topics extracted yet. Try uploading more study materials.")
+        else:
+            # Apply topic filter if provided
+            topic_filter = kd.get("topic_filter", "").strip()
+            display_graph = get_topic_subgraph(topic_filter, graph) if topic_filter else graph
+
+            node_count = len(display_graph["nodes"])
+            edge_count = len(display_graph["edges"])
+
+            st.markdown(f'<div style="padding:0 44px;">', unsafe_allow_html=True)
+
+            # Stats row
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Nodes", node_count)
+            m2.metric("Connections", edge_count)
+            m3.metric("Total Topics", len(graph["nodes"]))
+            m4.metric("Showing", f"{'All' if not topic_filter else topic_filter.title()}")
+
+            # Legend
+            st.markdown("""
+            <div class="kg-legend">
+              <div class="kg-item"><span class="kg-dot" style="background:#6c8ef5;"></span> Concept</div>
+              <div class="kg-item"><span class="kg-dot" style="background:#4ecb8d;"></span> Definition</div>
+              <div class="kg-item"><span class="kg-dot" style="background:#f0b84a;"></span> Algorithm</div>
+              <div class="kg-item"><span class="kg-dot" style="background:#f07070;"></span> Formula</div>
+              <div class="kg-item"><span class="kg-dot" style="background:#a78bfa;"></span> Application</div>
+              <div class="kg-item"><span class="kg-dot" style="background:#38bdf8;"></span> Theory</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Graph visualisation
+            html_str = render_graph_html(display_graph, height=520)
+            components.html(html_str, height=540, scrolling=False)
+
+            # Node table
+            with st.expander("📋 Node Details"):
+                for node in display_graph["nodes"]:
+                    st.markdown(
+                        f'<div class="fpill" style="margin-bottom:6px;">'
+                        f'<span class="kg-dot" style="background:{node.get("color","#6c8ef5")};width:12px;height:12px;border-radius:50%;flex-shrink:0;"></span>'
+                        f'<span class="fpill-name"><strong>{node["label"]}</strong> — {node.get("description","")}</span>'
+                        f'<span class="fpill-ext">{node.get("type","concept")}</span></div>',
+                        unsafe_allow_html=True
+                    )
+
+            st.markdown('</div>', unsafe_allow_html=True)
